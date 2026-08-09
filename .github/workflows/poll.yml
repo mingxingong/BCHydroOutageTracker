@@ -1,0 +1,20 @@
+name: Poll BC Hydro outages
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 min, matches BC Hydro's update cadence
+  workflow_dispatch:          # allows manual trigger from the Actions tab
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install requests supabase
+      - run: python poll_outages.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
