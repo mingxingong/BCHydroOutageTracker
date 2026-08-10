@@ -20,6 +20,7 @@ pip install "supabase>=2.10" --break-system-packages
 import json
 import os
 import subprocess
+import threading
 from datetime import datetime, timezone
 from supabase import create_client
 
@@ -62,29 +63,42 @@ def get_commit_list():
 
 def stream_snapshots(commits):
     """Reads every historical version of the JSON file via a single
-    `git cat-file --batch` process instead of one `git show` per commit."""
-    refs = "\n".join(f"{sha}:{JSON_PATH}" for sha, _ in commits)
+    `git cat-file --batch` process instead of one `git show` per commit.
+
+    Streams stdout incrementally (header line, then exactly `size` bytes of
+    content, then the batch format's trailing newline) instead of buffering
+    the whole process output and re-joining the remaining lines on every
+    iteration - the latter is O(n^2) and was OOM-killing the process on the
+    full ~120k-commit history."""
     proc = subprocess.Popen(
         ["git", "cat-file", "--batch"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
     )
-    stdout, _ = proc.communicate(refs)
-    lines = stdout.split("\n")
-    i = 0
-    idx = 0
-    while i < len(lines) and idx < len(commits):
-        header = lines[i]
+
+    def feed_stdin():
+        for sha, _ in commits:
+            proc.stdin.write(f"{sha}:{JSON_PATH}\n".encode())
+        proc.stdin.close()
+
+    writer = threading.Thread(target=feed_stdin, daemon=True)
+    writer.start()
+
+    stdout = proc.stdout
+    for sha, ts in commits:
+        header = stdout.readline()
+        if not header:
+            break
         parts = header.split()
-        if len(parts) < 3 or parts[1] == "missing":
-            i += 1
-            idx += 1
+        if len(parts) < 3 or parts[1] == b"missing":
             continue
         size = int(parts[2])
-        content = "\n".join(lines[i + 1:]).encode()[:size].decode(errors="replace")
-        yield commits[idx][0], commits[idx][1], content
-        consumed_lines = content.count("\n") + 1
-        i += 1 + consumed_lines
-        idx += 1
+        content = stdout.read(size).decode(errors="replace")
+        stdout.read(1)  # discard the batch format's trailing newline
+        yield sha, ts, content
+
+    writer.join()
+    proc.stdout.close()
+    proc.wait()
 
 
 def backfill():
