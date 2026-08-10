@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>BC Hydro Outage Hotspots</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<style>
+  html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
+  #map { position: absolute; top: 56px; bottom: 0; left: 0; right: 0; }
+  #bar {
+    height: 56px; display: flex; align-items: center; gap: 8px;
+    padding: 0 10px; background: #111; color: #eee; box-sizing: border-box;
+    flex-wrap: wrap;
+  }
+  #bar input {
+    padding: 6px 8px; border-radius: 4px; border: 1px solid #444;
+    background: #222; color: #eee; font-size: 12px;
+  }
+  #bar input[name="url"] { width: 260px; }
+  #bar input[name="key"] { width: 320px; }
+  #bar button {
+    padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer;
+    background: #2b7de9; color: white; font-size: 13px;
+  }
+  #bar label { font-size: 12px; display: flex; align-items: center; gap: 4px; }
+  #status { font-size: 12px; color: #9aa; margin-left: auto; }
+  .legend {
+    position: absolute; bottom: 20px; right: 10px; z-index: 1000;
+    background: white; padding: 8px 10px; border-radius: 6px;
+    font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+  }
+  .legend .grad { height: 10px; width: 160px;
+    background: linear-gradient(to right, blue, lime, yellow, red); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <input name="url" placeholder="https://xxxx.supabase.co" />
+  <input name="key" placeholder="anon / publishable key" />
+  <label><input type="checkbox" name="active" /> include active (unresolved) outages</label>
+  <button id="load">Load hotspots</button>
+  <span id="status"></span>
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script>
+const $ = (sel) => document.querySelector(sel);
+const urlInput = $('input[name="url"]');
+const keyInput = $('input[name="key"]');
+const activeCheckbox = $('input[name="active"]');
+const statusEl = $('#status');
+
+// Credentials are kept in localStorage only (never written to this file),
+// so this page is safe to commit even though it runs entirely client-side.
+urlInput.value = localStorage.getItem('bchydro_supabase_url') || '';
+keyInput.value = localStorage.getItem('bchydro_supabase_key') || '';
+
+const map = L.map('map').setView([49.18, -122.9], 10);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors',
+  maxZoom: 18,
+}).addTo(map);
+
+const legend = L.control({ position: 'bottomright' });
+legend.onAdd = () => {
+  const div = L.DomUtil.create('div', 'legend');
+  div.innerHTML = 'Outage hotspot score<br><div class="grad"></div>' +
+    '<div style="display:flex;justify-content:space-between"><span>low</span><span>high</span></div>';
+  return div;
+};
+legend.addTo(map);
+
+let heatLayer = null;
+let activeMarkers = L.layerGroup().addTo(map);
+
+async function supaGet(baseUrl, apiKey, path) {
+  const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/rest/v1/${path}`, {
+    headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}` },
+  });
+  if (!resp.ok) {
+    throw new Error(`${resp.status} ${resp.statusText}: ${await resp.text()}`);
+  }
+  return resp.json();
+}
+
+async function load() {
+  const baseUrl = urlInput.value.trim();
+  const apiKey = keyInput.value.trim();
+  if (!baseUrl || !apiKey) {
+    statusEl.textContent = 'Enter your Supabase URL and anon/publishable key first.';
+    return;
+  }
+  localStorage.setItem('bchydro_supabase_url', baseUrl);
+  localStorage.setItem('bchydro_supabase_key', apiKey);
+
+  statusEl.textContent = 'Loading...';
+  try {
+    // Historical hotspot grid: pre-aggregated polygon-overlay scores.
+    const grid = await supaGet(
+      baseUrl, apiKey,
+      'outage_hotspot_grid?select=lat,lon,hotspot_score&order=hotspot_score.desc&limit=5000'
+    );
+
+    const maxScore = Math.max(1, ...grid.map((r) => r.hotspot_score));
+    const points = grid.map((r) => [r.lat, r.lon, r.hotspot_score / maxScore]);
+
+    if (heatLayer) map.removeLayer(heatLayer);
+    heatLayer = L.heatLayer(points, { radius: 22, blur: 18, maxZoom: 13 }).addTo(map);
+
+    activeMarkers.clearLayers();
+    if (activeCheckbox.checked) {
+      // Current/unresolved outages, shown as distinct markers on top of
+      // the historical heat layer (outage_events.polygon isn't queried
+      // here - just the reported centroid - since these haven't resolved
+      // into a hotspot score yet).
+      const active = await supaGet(
+        baseUrl, apiKey,
+        'outage_events?select=id,municipality,customers_out,date_off,latitude,longitude&status=eq.active&latitude=not.is.null'
+      );
+      active.forEach((o) => {
+        L.circleMarker([o.latitude, o.longitude], {
+          radius: 6, color: '#e91e63', weight: 2, fillOpacity: 0.6,
+        })
+          .bindPopup(
+            `<b>${o.municipality || 'Unknown area'}</b><br>` +
+            `${o.customers_out ?? '?'} customers out<br>` +
+            `since ${new Date(o.date_off).toLocaleString()}`
+          )
+          .addTo(activeMarkers);
+      });
+    }
+
+    statusEl.textContent =
+      `${grid.length} hotspot cells` +
+      (activeCheckbox.checked ? `, ${activeMarkers.getLayers().length} active outages` : '');
+
+    if (points.length) {
+      map.fitBounds(points.map((p) => [p[0], p[1]]), { padding: [30, 30] });
+    }
+  } catch (err) {
+    statusEl.textContent = `Error: ${err.message}`;
+    console.error(err);
+  }
+}
+
+$('#load').addEventListener('click', load);
+if (urlInput.value && keyInput.value) load();
+</script>
+</body>
+</html>
