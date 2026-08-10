@@ -106,17 +106,18 @@ def backfill():
     print(f"Processing {len(commits)} historical snapshots...")
 
     seen = {}          # id -> latest active record dict
-    to_write = []       # finished outage_event rows, batched
+    to_write = {}      # id -> latest finished outage_event row, batched
     written = 0
 
     def flush():
         nonlocal to_write, written
         if not to_write:
             return
-        for i in range(0, len(to_write), BATCH_SIZE):
-            supabase.table("outage_events").upsert(to_write[i:i + BATCH_SIZE]).execute()
-        written += len(to_write)
-        to_write = []
+        rows = list(to_write.values())
+        for i in range(0, len(rows), BATCH_SIZE):
+            supabase.table("outage_events").upsert(rows[i:i + BATCH_SIZE]).execute()
+        written += len(rows)
+        to_write = {}
 
     for n, (sha, ts, content) in enumerate(stream_snapshots(commits)):
         try:
@@ -132,10 +133,12 @@ def backfill():
             current_ids.add(oid)
 
             if o.get("dateOn"):
-                # Already resolved as of this snapshot - emit once
-                if oid in seen or oid not in [r["id"] for r in to_write[-50:]]:
-                    row = build_row(o, resolved=True)
-                    to_write.append(row)
+                # A dict keyed by id means a resolved event that reappears
+                # in a later snapshot (common - resolved events often linger
+                # a few more polls before dropping out) just overwrites its
+                # own pending row instead of queuing a second one, so a
+                # single upsert batch can never contain the same id twice.
+                to_write[oid] = build_row(o, resolved=True)
                 seen.pop(oid, None)
             else:
                 seen[oid] = o
@@ -144,8 +147,7 @@ def backfill():
         vanished = set(seen.keys()) - current_ids
         for oid in vanished:
             last = seen.pop(oid)
-            row = build_row(last, resolved=True, fallback_date_on=ts)
-            to_write.append(row)
+            to_write[oid] = build_row(last, resolved=True, fallback_date_on=ts)
 
         if len(to_write) >= BATCH_SIZE:
             flush()
@@ -155,7 +157,7 @@ def backfill():
 
     # Remaining still-active outages as of the last commit
     for oid, o in seen.items():
-        to_write.append(build_row(o, resolved=False))
+        to_write[oid] = build_row(o, resolved=False)
     flush()
 
     print(f"Done. {written} historical outage events written.")
