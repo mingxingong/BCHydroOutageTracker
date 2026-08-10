@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from supabase import create_client
 
 JSON_PATH = "bchydro-outages.json"
-BATCH_SIZE = 500  # rows per Supabase upsert call
+BATCH_SIZE = 300  # rows per Supabase upsert call
 
 supabase = create_client(
     os.environ["SUPABASE_URL"],
