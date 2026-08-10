@@ -1,0 +1,31 @@
+name: Backfill BC Hydro outage history
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tracker repo
+        uses: actions/checkout@v4
+        with:
+          path: tracker
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Clone outage history source (full history, needed for git log/cat-file)
+        run: git clone https://github.com/outages/bchydro-outages.git source
+
+      - run: pip install "supabase>=2.10"
+
+      - run: cp tracker/backfill_outages.py source/backfill_outages.py
+
+      - name: Run backfill
+        working-directory: source
+        run: python backfill_outages.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
