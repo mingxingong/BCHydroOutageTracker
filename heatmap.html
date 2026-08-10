@@ -5,6 +5,7 @@
 <title>BC Hydro Outage Hotspots</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
 <style>
   html, body { margin: 0; height: 100%; font-family: system-ui, sans-serif; }
   #map { position: absolute; top: 56px; bottom: 0; left: 0; right: 0; }
@@ -13,12 +14,12 @@
     padding: 0 10px; background: #111; color: #eee; box-sizing: border-box;
     flex-wrap: wrap;
   }
-  #bar input {
+  #bar input[type="text"], #bar input:not([type]) {
     padding: 6px 8px; border-radius: 4px; border: 1px solid #444;
     background: #222; color: #eee; font-size: 12px;
   }
-  #bar input[name="url"] { width: 260px; }
-  #bar input[name="key"] { width: 320px; }
+  #bar input[name="url"] { width: 240px; }
+  #bar input[name="key"] { width: 300px; }
   #bar button {
     padding: 6px 12px; border-radius: 4px; border: none; cursor: pointer;
     background: #2b7de9; color: white; font-size: 13px;
@@ -28,24 +29,31 @@
   .legend {
     position: absolute; bottom: 20px; right: 10px; z-index: 1000;
     background: white; padding: 8px 10px; border-radius: 6px;
-    font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.3);
+    font-size: 12px; box-shadow: 0 1px 4px rgba(0,0,0,.3); line-height: 1.4;
   }
   .legend .grad { height: 10px; width: 160px;
     background: linear-gradient(to right, blue, lime, yellow, red); border-radius: 3px; }
+  .outage-cluster-icon div {
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 600; border-radius: 50%;
+    box-shadow: 0 0 0 2px rgba(255,255,255,.6);
+  }
+  .outage-popup b { font-size: 13px; }
 </style>
 </head>
 <body>
 <div id="bar">
   <input name="url" placeholder="https://xxxx.supabase.co" />
   <input name="key" placeholder="anon / publishable key" />
-  <label><input type="checkbox" name="active" /> include active (unresolved) outages</label>
-  <button id="load">Load hotspots</button>
+  <label><input type="checkbox" name="active" checked /> include active (unresolved) outages</label>
+  <button id="load">Load</button>
   <span id="status"></span>
 </div>
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+<script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
 <script>
 const $ = (sel) => document.querySelector(sel);
 const urlInput = $('input[name="url"]');
@@ -53,8 +61,8 @@ const keyInput = $('input[name="key"]');
 const activeCheckbox = $('input[name="active"]');
 const statusEl = $('#status');
 
-// Credentials are kept in localStorage only (never written to this file),
-// so this page is safe to commit even though it runs entirely client-side.
+// Credentials are kept in localStorage only (never written into this file),
+// so it's safe to keep this page committed even though it runs client-side.
 urlInput.value = localStorage.getItem('bchydro_supabase_url') || '';
 keyInput.value = localStorage.getItem('bchydro_supabase_key') || '';
 
@@ -67,23 +75,81 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const legend = L.control({ position: 'bottomright' });
 legend.onAdd = () => {
   const div = L.DomUtil.create('div', 'legend');
-  div.innerHTML = 'Outage hotspot score<br><div class="grad"></div>' +
-    '<div style="display:flex;justify-content:space-between"><span>low</span><span>high</span></div>';
+  div.innerHTML =
+    'Outage hotspot score (heat)<br><div class="grad"></div>' +
+    '<div style="display:flex;justify-content:space-between"><span>low</span><span>high</span></div>' +
+    '<div style="margin-top:6px">Bubbles: number of outages<br>at that location/cluster.<br>' +
+    'Zoom in to split them apart;<br>click one for details.</div>';
   return div;
 };
 legend.addTo(map);
 
-let heatLayer = null;
-let activeMarkers = L.layerGroup().addTo(map);
+// ---- Layer 1: historical hotspot heat (from the pre-aggregated grid view) ----
+let heatLayer = L.layerGroup();
 
-async function supaGet(baseUrl, apiKey, path) {
-  const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/rest/v1/${path}`, {
-    headers: { apikey: apiKey, Authorization: `Bearer ${apiKey}` },
+// ---- Layer 2: per-outage cluster bubbles (splits apart on zoom, like a
+// typical real-estate-listing map). Bubble size/color scale with count. ----
+function clusterIcon(cluster) {
+  const count = cluster.getChildCount();
+  const size = Math.round(Math.min(64, 22 + Math.sqrt(count) * 7));
+  const color = count >= 100 ? '#c0392b' : count >= 20 ? '#e67e22' : '#2b7de9';
+  return L.divIcon({
+    html: `<div style="width:${size}px;height:${size}px;background:${color}dd;` +
+          `border:2px solid ${color};font-size:${Math.max(11, size / 3.2)}px;">${count}</div>`,
+    className: 'outage-cluster-icon',
+    iconSize: L.point(size, size),
   });
-  if (!resp.ok) {
-    throw new Error(`${resp.status} ${resp.statusText}: ${await resp.text()}`);
+}
+
+let clusterLayer = L.markerClusterGroup({
+  iconCreateFunction: clusterIcon,
+  maxClusterRadius: 55,
+  chunkedLoading: true,
+  spiderfyOnMaxZoom: true,
+  showCoverageOnHover: false,
+});
+
+const overlays = { 'Hotspot heat (historical)': heatLayer, 'Outage clusters (click for detail)': clusterLayer };
+L.control.layers(null, overlays, { collapsed: false }).addTo(map);
+heatLayer.addTo(map);
+clusterLayer.addTo(map);
+
+async function supaGetAll(baseUrl, apiKey, path, pageSize = 1000) {
+  let all = [];
+  let from = 0;
+  for (;;) {
+    const resp = await fetch(`${baseUrl.replace(/\/$/, '')}/rest/v1/${path}`, {
+      headers: {
+        apikey: apiKey,
+        Authorization: `Bearer ${apiKey}`,
+        Range: `${from}-${from + pageSize - 1}`,
+      },
+    });
+    if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}: ${await resp.text()}`);
+    const page = await resp.json();
+    all = all.concat(page);
+    if (page.length < pageSize) break;
+    from += pageSize;
   }
-  return resp.json();
+  return all;
+}
+
+function formatDuration(minutes) {
+  if (minutes == null) return 'unknown';
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+}
+
+function outagePopup(o) {
+  const off = o.date_off ? new Date(o.date_off).toLocaleString() : 'unknown';
+  const onLine = o.date_on
+    ? `On: ${new Date(o.date_on).toLocaleString()}<br>Duration: ${formatDuration(o.duration_min)}`
+    : '<i>still active</i>';
+  return `<div class="outage-popup"><b>${o.municipality || 'Unknown area'}</b><br>` +
+    `Cause: ${o.cause || 'unknown'}<br>` +
+    `Customers out: ${o.customers_out ?? '?'}<br>` +
+    `Off: ${off}<br>${onLine}</div>`;
 }
 
 async function load() {
@@ -99,47 +165,38 @@ async function load() {
   statusEl.textContent = 'Loading...';
   try {
     // Historical hotspot grid: pre-aggregated polygon-overlay scores.
-    const grid = await supaGet(
+    const grid = await supaGetAll(
       baseUrl, apiKey,
-      'outage_hotspot_grid?select=lat,lon,hotspot_score&order=hotspot_score.desc&limit=5000'
+      'outage_hotspot_grid?select=lat,lon,hotspot_score&order=hotspot_score.desc'
+    );
+    const maxScore = Math.max(1, ...grid.map((r) => r.hotspot_score));
+    const heatPoints = grid.map((r) => [r.lat, r.lon, r.hotspot_score / maxScore]);
+    heatLayer.clearLayers();
+    L.heatLayer(heatPoints, { radius: 22, blur: 18, maxZoom: 13 }).addTo(heatLayer);
+
+    // Per-outage points: one per outage_events row (its reported lat/lon),
+    // clustered by proximity so counts roll up when zoomed out and split
+    // apart as you zoom in. status filter controls whether unresolved
+    // (still-active) outages are included alongside resolved history.
+    const statusFilter = activeCheckbox.checked ? '' : '&status=eq.resolved';
+    const events = await supaGetAll(
+      baseUrl, apiKey,
+      'outage_events?select=id,municipality,cause,customers_out,status,date_off,date_on,duration_min,latitude,longitude' +
+      `&latitude=not.is.null&order=date_off.desc${statusFilter}`
     );
 
-    const maxScore = Math.max(1, ...grid.map((r) => r.hotspot_score));
-    const points = grid.map((r) => [r.lat, r.lon, r.hotspot_score / maxScore]);
+    clusterLayer.clearLayers();
+    const markers = events.map((o) =>
+      L.marker([o.latitude, o.longitude]).bindPopup(outagePopup(o))
+    );
+    clusterLayer.addLayers(markers);
 
-    if (heatLayer) map.removeLayer(heatLayer);
-    heatLayer = L.heatLayer(points, { radius: 22, blur: 18, maxZoom: 13 }).addTo(map);
+    statusEl.textContent = `${grid.length} hotspot cells, ${events.length} outages plotted`;
 
-    activeMarkers.clearLayers();
-    if (activeCheckbox.checked) {
-      // Current/unresolved outages, shown as distinct markers on top of
-      // the historical heat layer (outage_events.polygon isn't queried
-      // here - just the reported centroid - since these haven't resolved
-      // into a hotspot score yet).
-      const active = await supaGet(
-        baseUrl, apiKey,
-        'outage_events?select=id,municipality,customers_out,date_off,latitude,longitude&status=eq.active&latitude=not.is.null'
-      );
-      active.forEach((o) => {
-        L.circleMarker([o.latitude, o.longitude], {
-          radius: 6, color: '#e91e63', weight: 2, fillOpacity: 0.6,
-        })
-          .bindPopup(
-            `<b>${o.municipality || 'Unknown area'}</b><br>` +
-            `${o.customers_out ?? '?'} customers out<br>` +
-            `since ${new Date(o.date_off).toLocaleString()}`
-          )
-          .addTo(activeMarkers);
-      });
-    }
-
-    statusEl.textContent =
-      `${grid.length} hotspot cells` +
-      (activeCheckbox.checked ? `, ${activeMarkers.getLayers().length} active outages` : '');
-
-    if (points.length) {
-      map.fitBounds(points.map((p) => [p[0], p[1]]), { padding: [30, 30] });
-    }
+    const bounds = heatPoints.length
+      ? L.latLngBounds(heatPoints.map((p) => [p[0], p[1]]))
+      : (markers.length ? clusterLayer.getBounds() : null);
+    if (bounds) map.fitBounds(bounds, { padding: [30, 30] });
   } catch (err) {
     statusEl.textContent = `Error: ${err.message}`;
     console.error(err);
