@@ -56,7 +56,7 @@ create table outage_property_matches (
 -- Spatial match function: finds properties inside outage polygons and
 -- inserts new matches (skips ones already recorded). Called by the poller.
 create or replace function match_properties_in_outages()
-returns table (outage_id bigint, property_id bigint) as $$
+returns table (matched_outage_id bigint, matched_property_id bigint) as $$
 begin
     return query
     insert into outage_property_matches (outage_id, property_id)
