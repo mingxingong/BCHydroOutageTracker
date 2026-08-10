@@ -24,7 +24,17 @@ SUPABASE_URL=... SUPABASE_SERVICE_KEY=... python /path/to/backfill_outages.py
 - `outage_property_matches` — which of your target properties sat inside which outage's affected area.
 - `property_outage_stats` view — per property: outage count, % of outages under 4 hours, most recent outage. Query this directly for your "many short outages = good battery backup fit" scoring.
 
-## 5. Next step: outreach trigger
+## 5. View the hotspot heatmap
+`heatmap.html` is a self-contained page (Leaflet + Leaflet.heat, loaded from a CDN, no build step) that plots `outage_hotspot_grid` as a heatmap over Metro Vancouver, with an optional overlay of currently-active outages.
+
+1. Open `heatmap.html` directly in a browser (double-click it, or serve the repo with anything static).
+2. In Supabase: Settings > API, copy the **Project URL** and the **anon/publishable key** (`sb_publishable_...`, or legacy `anon` key - never the secret/service key here, since this page runs client-side).
+3. Paste both into the bar at the top and click **Load hotspots**. Check "include active outages" to also plot outages that haven't resolved yet as red markers on top of the heat layer.
+4. Your credentials are kept in `localStorage` only (not written into the file), so it's safe to keep this file committed to the repo.
+
+This requires the grant/revoke block at the bottom of `schema.sql` (run once, alongside the rest of the schema) so the anon key can read outage data but not write it or see your private `properties` list.
+
+## 6. Next step: outreach trigger
 Once matches have ~1-2 weeks of history, a small script (or a scheduled query) can find properties where `outreach_flagged_at` is still null and the match is 7-14 days old, then push a ClickUp task for cold outreach — same pattern as your existing Daily Hive workflow, just triggered by outage data instead of news scraping. Happy to build that piece next once the base pipeline is running and you've loaded a property list.
 
 ## Notes
