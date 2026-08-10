@@ -155,3 +155,19 @@ join outage_property_matches oem on oem.property_id = p.id
 join outage_events oe on oe.id = oem.outage_id
 where oe.status = 'resolved'
 group by p.id, p.name, p.company;
+
+-- Lock down PostgREST access. Supabase grants anon/authenticated full
+-- read+write on every new public-schema table by default, so without this
+-- anyone holding the anon/publishable key (e.g. embedded in heatmap.html)
+-- could read AND modify everything, including the private property list.
+
+-- Outage data is already public (BC Hydro publishes it themselves), so
+-- expose it read-only to anon/authenticated, and take back write access -
+-- only the service key (used by poll_outages.py / backfill_outages.py)
+-- should ever write.
+revoke insert, update, delete on outage_events, hotspot_grid from anon, authenticated;
+grant select on outage_events, hotspot_grid, outage_hotspot_grid, outage_hotspots to anon, authenticated;
+
+-- Your C&I prospect list and match data stay private: no anon/authenticated
+-- access at all, only service_role (which bypasses grants entirely).
+revoke all on properties, outage_property_matches, property_outage_stats from anon, authenticated;
