@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install requests supabase
+      - run: pip install requests "supabase>=2.10"
       - run: python poll_outages.py
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}

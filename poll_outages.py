@@ -6,9 +6,10 @@ BC Hydro's own update cadence.
 
 Env vars required:
     SUPABASE_URL
-    SUPABASE_SERVICE_KEY   (service role key, not the anon key - needed for writes)
+    SUPABASE_SERVICE_KEY   (the secret key - sb_secret_..., or legacy service_role -
+                            not the publishable/anon key, since the poller writes data)
 
-pip install requests supabase --break-system-packages
+pip install requests "supabase>=2.10" --break-system-packages
 """
 
 import os

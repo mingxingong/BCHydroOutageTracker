@@ -7,7 +7,7 @@
 
 ## 2. Set up the poller
 1. `poll_outages.py` lives at the repo root; `poll.yml` lives at `.github/workflows/poll.yml` — both are already in place in this repo.
-2. Add repo secrets: `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (Settings > API in your Supabase project — use the **service_role** key, not anon, since the poller writes data). GitHub: Settings > Secrets and variables > Actions > New repository secret.
+2. Add repo secrets: `SUPABASE_URL` and `SUPABASE_SERVICE_KEY` (Settings > API in your Supabase project — use the **secret** key (`sb_secret_...`), or the legacy **service_role** key if your project still uses those; not `publishable`/`anon`, since the poller writes data). GitHub: Settings > Secrets and variables > Actions > New repository secret.
 3. Push. GitHub Actions will start polling BC Hydro's feed every 15 minutes and syncing outages + matches into Supabase automatically, free of charge.
 
 ## 3. One-time backfill (optional but recommended)
@@ -15,7 +15,7 @@
 ```
 git clone https://github.com/outages/bchydro-outages.git
 cd bchydro-outages
-pip install supabase --break-system-packages
+pip install "supabase>=2.10" --break-system-packages
 SUPABASE_URL=... SUPABASE_SERVICE_KEY=... python /path/to/backfill_outages.py
 ```
 

@@ -12,9 +12,9 @@ Usage:
 
 Env vars required (same as poll_outages.py):
     SUPABASE_URL
-    SUPABASE_SERVICE_KEY
+    SUPABASE_SERVICE_KEY   (the secret key - sb_secret_..., or legacy service_role)
 
-pip install supabase --break-system-packages
+pip install "supabase>=2.10" --break-system-packages
 """
 
 import json
